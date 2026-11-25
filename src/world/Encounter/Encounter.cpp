@@ -46,9 +46,14 @@ namespace Sapphire
     return m_id;
   }
 
-  void Encounter::init()
+  bool Encounter::init( std::shared_ptr< TimelinePack > timeline )
   {
-    m_pTimeline = TimelinePack::createTimelinePack( m_setup.timelineName );
+    m_pTimeline = timeline ? std::move( timeline ) : TimelinePack::createTimelinePack( m_setup.timelineName );
+    if( !m_pTimeline )
+    {
+      Logger::error( "Encounter::init failed to load timeline {}", m_setup.timelineName );
+      return false;
+    }
     m_pTimeline->setEncounter( shared_from_this() );
     m_status = EncounterStatus::IDLE;
     m_startTime = 0;
@@ -65,7 +70,7 @@ namespace Sapphire
       if( !loadEncounterShape( m_setup.polygonShapeFile ) )
       {
         Logger::error( "Encounter::init failed to load encounter shape at {}", m_setup.polygonShapeFile );
-        return;
+        return false;
       }
     }
 
@@ -159,6 +164,8 @@ namespace Sapphire
         m_eobjs.emplace( pEObj->getName(), pEObj );
       }
     }
+
+    return true;
   }
 
   void Encounter::setEncounterSetup( const EncounterSetup& setup )

@@ -126,7 +126,9 @@ namespace Sapphire
 
     uint32_t getId() const;
 
-    void init();
+    // timeline: an already parsed pack to use; null parses m_setup.timelineName.
+    // returns false (and logs) when the timeline or the encounter shape fails to load
+    bool init( std::shared_ptr< TimelinePack > timeline = nullptr );
 
     void setEncounterSetup( const EncounterSetup& setup );
 

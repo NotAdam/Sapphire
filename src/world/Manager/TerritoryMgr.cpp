@@ -14,6 +14,7 @@
 
 #include "Territory/InstanceContent.h"
 #include "Territory/QuestBattle.h"
+#include "Script/ScriptMgr.h"
 #include "TerritoryMgr.h"
 #include "HousingMgr.h"
 #include "WarpMgr.h"
@@ -514,6 +515,13 @@ bool TerritoryMgr::removeTerritoryInstance( uint32_t guId )
   m_instanceZoneSet.erase( pZone );
   m_territorySet.erase( pZone );
 
+  // a Luau scripted instance or quest battle holds its territory (through its encounter) until it is told
+  auto& scriptMgr = Common::Service< Scripting::ScriptMgr >::ref();
+  if( auto instance = pZone->getAsInstanceContent() )
+    scriptMgr.onInstanceDestroy( *instance );
+  else if( auto battle = pZone->getAsQuestBattle() )
+    scriptMgr.onInstanceDestroy( *battle );
+
   if( isInstanceContentTerritory( pZone->getTerritoryTypeId() ) )
   {
     auto instance = std::dynamic_pointer_cast< InstanceContent >( pZone );
@@ -596,6 +604,8 @@ void TerritoryMgr::updateTerritoryInstances( uint64_t tickCount )
       {
         Logger::info( "Removing QuestBattle#{0} - has been inactive for 60 seconds", zone->getGuId() );
 
+        Common::Service< Scripting::ScriptMgr >::ref().onInstanceDestroy( *zone );
+
         // remove zone from maps
         m_instanceZoneSet.erase( zone );
         m_guIdToTerritoryPtrMap.erase( zone->getGuId() );
@@ -621,6 +631,8 @@ void TerritoryMgr::updateTerritoryInstances( uint64_t tickCount )
       if( zone->isTerminationReady() )
       {
         Logger::info( "Removing InstanceContent#{0} - marked for terminate", zone->getGuId() );
+
+        Common::Service< Scripting::ScriptMgr >::ref().onInstanceDestroy( *zone );
 
         // remove zone from maps
         m_instanceZoneSet.erase( zone );

@@ -29,3 +29,6 @@
 [submodule "deps/zlib"]
 	path = deps/zlib
 	url = https://github.com/madler/zlib.git
+[submodule "deps/luau"]
+	path = deps/luau
+	url = https://github.com/luau-lang/luau

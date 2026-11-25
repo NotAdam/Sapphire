@@ -23,6 +23,7 @@
 #include "Network/PacketWrappers/ServerNoticePacket.h"
 
 #include "Script/ScriptMgr.h"
+#include "Script/Luau/LuauScriptMgr.h"
 
 #include "NativeScriptMgr.h"
 #include "WorldServer.h"
@@ -42,6 +43,7 @@ Sapphire::Scripting::ScriptMgr::ScriptMgr() :
 
 Sapphire::Scripting::ScriptMgr::ScriptMgr( std::shared_ptr< NativeScriptMgr > nativeScriptMgr ) :
   m_nativeScriptMgr( std::move( nativeScriptMgr ) ),
+  m_luau( std::make_unique< LuauScriptMgr >() ),
   m_firstScriptChangeNotificiation( false )
 {
 }
@@ -62,6 +64,8 @@ void Sapphire::Scripting::ScriptMgr::stopWatchingDirectories()
 
 void Sapphire::Scripting::ScriptMgr::shutdown()
 {
+  m_luau->shutdown();
+
   // Stop watching for changes and unload scripts
   stopWatchingDirectories();
   if( m_nativeScriptMgr )
@@ -75,6 +79,7 @@ void Sapphire::Scripting::ScriptMgr::shutdown()
 void Sapphire::Scripting::ScriptMgr::update()
 {
   m_nativeScriptMgr->processLoadQueue();
+  m_luau->update( Common::Util::getTimeMs() );
 }
 
 bool Sapphire::Scripting::ScriptMgr::init()
@@ -105,6 +110,31 @@ bool Sapphire::Scripting::ScriptMgr::init()
   }
 
   Logger::info( "ScriptMgr: Loaded {0}/{1} modules", scriptsLoaded, scriptsFound );
+
+  m_luau->init( server.getConfig().scripts, [ this ]( ScriptKind kind, uint32_t id )
+  {
+    switch( kind )
+    {
+      case ScriptKind::Instance:
+        return m_nativeScriptMgr->getScript< Sapphire::ScriptAPI::InstanceContentScript >( id ) != nullptr;
+      case ScriptKind::Quest:
+        return m_nativeScriptMgr->getScript< Sapphire::ScriptAPI::QuestScript >( id ) != nullptr;
+      case ScriptKind::Event:
+        return m_nativeScriptMgr->getScript< Sapphire::ScriptAPI::EventScript >( id ) != nullptr;
+      case ScriptKind::QuestBattle:
+        return m_nativeScriptMgr->getScript< Sapphire::ScriptAPI::QuestBattleScript >( id ) != nullptr;
+      case ScriptKind::Action:
+        return m_nativeScriptMgr->getScript< Sapphire::ScriptAPI::ActionScript >( id ) != nullptr;
+      case ScriptKind::Status:
+        return m_nativeScriptMgr->getScript< Sapphire::ScriptAPI::StatusEffectScript >( id ) != nullptr;
+      case ScriptKind::Zone:
+        return m_nativeScriptMgr->getScript< Sapphire::ScriptAPI::ZoneScript >( id ) != nullptr;
+      case ScriptKind::EObj:
+        return m_nativeScriptMgr->getScript< Sapphire::ScriptAPI::EventObjectScript >( id ) != nullptr;
+      default:
+        return false;
+    }
+  } );
 
   watchDirectories();
 
@@ -199,6 +229,13 @@ bool Sapphire::Scripting::ScriptMgr::onTalk( Entity::Player& player, uint64_t ac
   auto& exdData = Common::Service< Data::ExdData >::ref();
   if( eventType == Event::EventHandler::EventHandlerType::Quest )
   {
+    if( auto* luau = m_luau->questScript( eventId ) )
+    {
+      auto actorBaseId = Common::Service< World::Manager::EventMgr >::ref().getActorBaseId( static_cast< uint32_t >( actorId ) );
+      m_luau->questHook( *luau, ScriptHandler::onTalk, player, eventId, false, { double( actorBaseId ) } );
+      return true;
+    }
+
     auto script = m_nativeScriptMgr->getScript< Sapphire::ScriptAPI::QuestScript >( eventId );
     if( !script )
     {
@@ -238,8 +275,19 @@ bool Sapphire::Scripting::ScriptMgr::onTalk( Entity::Player& player, uint64_t ac
   // check if the actor is an eobj and call its script if we have one
   auto& teriMgr = Common::Service< World::Manager::TerritoryMgr >::ref();
   auto zone = teriMgr.getTerritoryByGuId( player.getTerritoryId() );
+  // an instance created under a Luau script stays Luau for its lifetime
+  auto luauInstance = zone ? zone->getAsInstanceContent() : nullptr;
+  if( luauInstance && !m_luau->ownsInstance( *luauInstance ) )
+    luauInstance = nullptr;
+
   if( auto eobj = zone ? zone->getEObj( static_cast< uint32_t >( actorId ) ) : nullptr )
   {
+    if( auto* luau = m_luau->script( ScriptKind::EObj, eobj->getBaseId() ) )
+    {
+      m_luau->eobjHook( *luau, player, eobj, eventId );
+      return true;
+    }
+
     auto script = m_nativeScriptMgr->getScript< Sapphire::ScriptAPI::EventObjectScript >( eobj->getBaseId() );
     if( script )
     {
@@ -247,7 +295,12 @@ bool Sapphire::Scripting::ScriptMgr::onTalk( Entity::Player& player, uint64_t ac
       return true;
     }
 
-    if( auto instance = zone->getAsInstanceContent() )
+    if( luauInstance )
+    {
+      if( m_luau->onInstanceTalk( *luauInstance, player, eobj, eventId, actorId ) )
+        return true;
+    }
+    else if( auto instance = zone->getAsInstanceContent() )
     {
       auto instanceScript = m_nativeScriptMgr->getScript< Sapphire::ScriptAPI::InstanceContentScript >(
         instance->getDirectorId() );
@@ -260,10 +313,20 @@ bool Sapphire::Scripting::ScriptMgr::onTalk( Entity::Player& player, uint64_t ac
   }
 
   // check for a direct eventid match first, otherwise default to base type
+  if( auto* luau = m_luau->script( ScriptKind::Event, eventId ) )
+  {
+    m_luau->eventHook( *luau, ScriptHandler::onTalk, player, eventId, { actorId } );
+    return true;
+  }
   auto script = m_nativeScriptMgr->getScript< Sapphire::ScriptAPI::EventScript >( eventId );
   if( script )
   {
     script->onTalk( eventId, player, actorId );
+    return true;
+  }
+  if( auto* luau = m_luau->script( ScriptKind::Event, eventId & 0xFFFF0000 ) )
+  {
+    m_luau->eventHook( *luau, ScriptHandler::onTalk, player, eventId, { actorId } );
     return true;
   }
   script = m_nativeScriptMgr->getScript< Sapphire::ScriptAPI::EventScript >( eventId & 0xFFFF0000 );
@@ -274,6 +337,9 @@ bool Sapphire::Scripting::ScriptMgr::onTalk( Entity::Player& player, uint64_t ac
   }
   // fallthrough to instance content check
   // todo: this zone check might fumbling it. need testing
+  if( luauInstance )
+    return m_luau->onInstanceTalk( *luauInstance, player, nullptr, eventId, actorId );
+
   if( auto instance = zone ? zone->getAsInstanceContent() : nullptr )
   {
     auto instanceScript = m_nativeScriptMgr->getScript< Sapphire::ScriptAPI::InstanceContentScript >( instance->getDirectorId() );
@@ -291,6 +357,9 @@ bool Sapphire::Scripting::ScriptMgr::onYield( Entity::Player& player, uint32_t e
                                               uint8_t resumeId,
                                               const std::string& resultString, uint64_t resultInt )
 {
+  if( m_luau->onYield( player, eventId, sceneId, resumeId, resultString, resultInt ) )
+    return true;
+
   auto eventType = static_cast< uint16_t >( eventId >> 16 );
   auto& exdData = Common::Service< Data::ExdData >::ref();
   if( eventType == Event::EventHandler::EventHandlerType::Quest )
@@ -322,8 +391,19 @@ bool Sapphire::Scripting::ScriptMgr::onEnterTerritory( Entity::Player& player, u
 {
   const auto eventType = static_cast< uint16_t >( eventId >> 16 );
 
+  if( auto* luau = eventType != Event::EventHandler::EventHandlerType::Quest ? m_luau->script( ScriptKind::Event, eventId ) : nullptr )
+  {
+    m_luau->eventHook( *luau, ScriptHandler::onEnterTerritory, player, eventId, { double( param1 ), double( param2 ) } );
+    return true;
+  }
+
   if( eventType == Event::EventHandler::EventHandlerType::Quest )
   {
+    if( auto* luau = m_luau->questScript( eventId ) )
+    {
+      m_luau->questHook( *luau, ScriptHandler::onEnterTerritory, player, eventId, true, { double( param1 ), double( param2 ) } );
+      return true;
+    }
     auto script = m_nativeScriptMgr->getScript< Sapphire::ScriptAPI::QuestScript >( eventId );
     if( !script )
       return false;
@@ -351,8 +431,20 @@ bool Sapphire::Scripting::ScriptMgr::onWithinRange( Entity::Player& player, uint
   const auto eventType = static_cast< uint16_t >( eventId >> 16 );
   auto& pEventMgr = Common::Service< World::Manager::EventMgr >::ref();
 
+  if( auto* luau = eventType != Event::EventHandler::EventHandlerType::Quest ? m_luau->script( ScriptKind::Event, eventId ) : nullptr )
+  {
+    m_luau->eventHook( *luau, ScriptHandler::onWithinRange, player, eventId, { double( param1 ), Common::Vector3{ x, y, z } } );
+    return true;
+  }
+
   if( eventType == Event::EventHandler::EventHandlerType::Quest )
   {
+    if( auto* luau = m_luau->questScript( eventId ) )
+    {
+      m_luau->questHook( *luau, ScriptHandler::onWithinRange, player, eventId, true,
+                         { double( eventId ), double( param1 ), Common::Vector3{ x, y, z } } );
+      return true;
+    }
     auto script = m_nativeScriptMgr->getScript< Sapphire::ScriptAPI::QuestScript >( eventId );
     if( !script )
       return false;
@@ -369,6 +461,11 @@ bool Sapphire::Scripting::ScriptMgr::onWithinRange( Entity::Player& player, uint
   else if( auto script = m_nativeScriptMgr->getScript< Sapphire::ScriptAPI::EventScript >( eventId ) )
   {
     script->onWithinRange( player, eventId, param1, x, y, z );
+  }
+  else if( auto* luau = m_luau->script( ScriptKind::Zone, player.getTerritoryTypeId() ) )
+  {
+    m_luau->zoneHook( *luau, ScriptHandler::onWithinRange, player, eventId,
+                      { double( param1 ), Common::Vector3{ x, y, z } } );
   }
   else if( auto script = m_nativeScriptMgr->getScript<
     Sapphire::ScriptAPI::ZoneScript >( player.getTerritoryTypeId() ) )
@@ -389,8 +486,20 @@ bool Sapphire::Scripting::ScriptMgr::onOutsideRange( Entity::Player& player, uin
   const auto eventType = static_cast< uint16_t >( eventId >> 16 );
   auto& pEventMgr = Common::Service< World::Manager::EventMgr >::ref();
 
+  if( auto* luau = eventType != Event::EventHandler::EventHandlerType::Quest ? m_luau->script( ScriptKind::Event, eventId ) : nullptr )
+  {
+    m_luau->eventHook( *luau, ScriptHandler::onOutsideRange, player, eventId, { double( param1 ), Common::Vector3{ x, y, z } } );
+    return true;
+  }
+
   if( eventType == Event::EventHandler::EventHandlerType::Quest )
   {
+    if( auto* luau = m_luau->questScript( eventId ) )
+    {
+      m_luau->questHook( *luau, ScriptHandler::onOutsideRange, player, eventId, true,
+                         { double( eventId ), double( param1 ), Common::Vector3{ x, y, z } } );
+      return true;
+    }
     auto script = m_nativeScriptMgr->getScript< Sapphire::ScriptAPI::QuestScript >( eventId );
     if( !script )
       return false;
@@ -422,8 +531,19 @@ bool Sapphire::Scripting::ScriptMgr::onEmote( Entity::Player& player, uint64_t a
 
   auto& pEventMgr = Common::Service< World::Manager::EventMgr >::ref();
   auto actor = pEventMgr.getActorBaseId( static_cast< uint32_t >( actorId ) );
+  if( auto* luau = eventType != Event::EventHandler::EventHandlerType::Quest ? m_luau->script( ScriptKind::Event, eventId ) : nullptr )
+  {
+    m_luau->eventHook( *luau, ScriptHandler::onEmote, player, eventId, { double( actor ), double( emoteId ) } );
+    return true;
+  }
+
   if( eventType == Event::EventHandler::EventHandlerType::Quest )
   {
+    if( auto* luau = m_luau->questScript( eventId ) )
+    {
+      m_luau->questHook( *luau, ScriptHandler::onEmote, player, eventId, true, { double( actor ), double( emoteId ) } );
+      return true;
+    }
     auto script = m_nativeScriptMgr->getScript< Sapphire::ScriptAPI::QuestScript >( eventId );
     if( !script )
       return false;
@@ -458,6 +578,13 @@ bool Sapphire::Scripting::ScriptMgr::onEventHandlerReturn( Entity::Player& playe
 bool Sapphire::Scripting::ScriptMgr::onEventHandlerTradeReturn( Entity::Player& player, uint32_t eventId,
                                                                 uint16_t subEvent, uint16_t param, uint32_t catalogId )
 {
+  if( auto* luau = m_luau->script( ScriptKind::Event, eventId ) )
+  {
+    m_luau->eventHook( *luau, ScriptHandler::onTradeReturn, player, eventId,
+                       { double( subEvent ), double( param ), double( catalogId ) } );
+    return true;
+  }
+
   auto script = m_nativeScriptMgr->getScript< Sapphire::ScriptAPI::EventScript >( eventId );
   if( script )
   {
@@ -483,6 +610,9 @@ bool Sapphire::Scripting::ScriptMgr::onEventItem( Entity::Player& player, uint32
   auto& exdData = Common::Service< Data::ExdData >::ref();
   if( eventType == Event::EventHandler::EventHandlerType::Quest )
   {
+    if( auto* luau = m_luau->questScript( eventId ) )
+      return m_luau->questHook( *luau, ScriptHandler::onEventItem, player, eventId, true, { double( actor ) } );
+
     auto script = m_nativeScriptMgr->getScript< Sapphire::ScriptAPI::QuestScript >( eventId );
     if( script )
     {
@@ -518,6 +648,9 @@ bool Sapphire::Scripting::ScriptMgr::onEventGroundItem( Entity::Player& player, 
   auto& exdData = Common::Service< Data::ExdData >::ref();
   if( eventType == Event::EventHandler::EventHandlerType::Quest )
   {
+    if( auto* luau = m_luau->questScript( eventId ) )
+      return m_luau->questHook( *luau, ScriptHandler::onEventGroundItem, player, eventId, true, { pos } );
+
     auto script = m_nativeScriptMgr->getScript< Sapphire::ScriptAPI::QuestScript >( eventId );
     if( script )
     {
@@ -552,6 +685,12 @@ void Sapphire::Scripting::ScriptMgr::onTriggerOwnerDeaggro( Entity::Player& play
 
     uint32_t questId = quest.getId() | Event::EventHandler::EventHandlerType::Quest << 16;
 
+    if( auto* luau = m_luau->questScript( questId ) )
+    {
+      m_luau->questHook( *luau, ScriptHandler::onTriggerOwnerDeaggro, player, questId, true, { bnpc.getAsBNpc() } );
+      continue;
+    }
+
     auto script = m_nativeScriptMgr->getScript< Sapphire::ScriptAPI::QuestScript >( questId );
     if( script )
     {
@@ -582,6 +721,12 @@ void Sapphire::Scripting::ScriptMgr::onBNpcKill( const World::Notifications::Npc
 
     uint32_t questId = quest.getId() | Event::EventHandler::EventHandlerType::Quest << 16;
 
+    if( auto* luau = m_luau->questScript( questId ) )
+    {
+      m_luau->questHook( *luau, ScriptHandler::onBNpcKill, player, questId, true, { bnpc.getAsBNpc() } );
+      continue;
+    }
+
     auto script = m_nativeScriptMgr->getScript< Sapphire::ScriptAPI::QuestScript >( questId );
     if( script )
     {
@@ -610,6 +755,12 @@ void Sapphire::Scripting::ScriptMgr::onPlayerDeath( const World::Notifications::
       continue;
 
     uint32_t questId = quest.getId() | Event::EventHandler::EventHandlerType::Quest << 16;
+
+    if( auto* luau = m_luau->questScript( questId ) )
+    {
+      m_luau->questHook( *luau, ScriptHandler::onPlayerDeath, player, questId, true, {} );
+      continue;
+    }
 
     auto script = m_nativeScriptMgr->getScript< Sapphire::ScriptAPI::QuestScript >( questId );
     if( script )
@@ -640,6 +791,13 @@ bool Sapphire::Scripting::ScriptMgr::onEObjHit( Sapphire::Entity::Player& player
 
     uint32_t questId = quest.getId() | Event::EventHandler::EventHandlerType::Quest << 16;
 
+    if( auto* luau = m_luau->questScript( questId ) )
+    {
+      didCallScript = true;
+      m_luau->questHook( *luau, ScriptHandler::onEObjHit, player, questId, true, { double( actor ), double( actionId ) } );
+      continue;
+    }
+
     auto script = m_nativeScriptMgr->getScript< Sapphire::ScriptAPI::QuestScript >( questId );
     if( script )
     {
@@ -660,6 +818,12 @@ bool Sapphire::Scripting::ScriptMgr::onEObjHit( Sapphire::Entity::Player& player
 
 bool Sapphire::Scripting::ScriptMgr::onExecute( World::Action::Action& action )
 {
+  if( auto* luau = m_luau->script( ScriptKind::Action, action.getId() ) )
+  {
+    m_luau->syncHook( *luau, ScriptHandler::onExecute, { &action } );
+    return true;
+  }
+
   auto script = m_nativeScriptMgr->getScript< Sapphire::ScriptAPI::ActionScript >( action.getId() );
 
   if( script )
@@ -672,6 +836,12 @@ bool Sapphire::Scripting::ScriptMgr::onExecute( World::Action::Action& action )
 
 bool Sapphire::Scripting::ScriptMgr::onAfterBuildEffect( World::Action::Action& action )
 {
+  if( auto* luau = m_luau->script( ScriptKind::Action, action.getId() ) )
+  {
+    m_luau->syncHook( *luau, ScriptHandler::onAfterBuildEffect, { &action } );
+    return true;
+  }
+
   auto script = m_nativeScriptMgr->getScript< Sapphire::ScriptAPI::ActionScript >( action.getId() );
 
   if( script )
@@ -684,6 +854,12 @@ bool Sapphire::Scripting::ScriptMgr::onAfterBuildEffect( World::Action::Action& 
 
 bool Sapphire::Scripting::ScriptMgr::onInterrupt( World::Action::Action& action )
 {
+  if( auto* luau = m_luau->script( ScriptKind::Action, action.getId() ) )
+  {
+    m_luau->syncHook( *luau, ScriptHandler::onInterrupt, { &action } );
+    return true;
+  }
+
   auto script = m_nativeScriptMgr->getScript< Sapphire::ScriptAPI::ActionScript >( action.getId() );
 
   if( script )
@@ -702,6 +878,12 @@ bool Sapphire::Scripting::ScriptMgr::onBeforeBootstrap( World::Action::Action& a
     return false;
   }
 
+  if( auto* luau = m_luau->script( ScriptKind::Action, action.getId() ) )
+  {
+    m_luau->syncHook( *luau, ScriptHandler::onBeforeBootstrap, { &action } );
+    return true;
+  }
+
   auto script = m_nativeScriptMgr->getScript< Sapphire::ScriptAPI::ActionScript >( action.getId() );
 
   if( script )
@@ -715,6 +897,12 @@ bool Sapphire::Scripting::ScriptMgr::onBeforeBootstrap( World::Action::Action& a
 
 bool Sapphire::Scripting::ScriptMgr::onStart( World::Action::Action& action )
 {
+  if( auto* luau = m_luau->script( ScriptKind::Action, action.getId() ) )
+  {
+    m_luau->syncHook( *luau, ScriptHandler::onStart, { &action } );
+    return true;
+  }
+
   auto script = m_nativeScriptMgr->getScript< Sapphire::ScriptAPI::ActionScript >( action.getId() );
 
   if( script )
@@ -728,6 +916,12 @@ bool Sapphire::Scripting::ScriptMgr::onStart( World::Action::Action& action )
 
 bool Sapphire::Scripting::ScriptMgr::onStatusReceive( Entity::CharaPtr pActor, uint32_t effectId )
 {
+  if( auto* luau = m_luau->script( ScriptKind::Status, effectId ) )
+  {
+    m_luau->syncHook( *luau, ScriptHandler::onApply, { pActor } );
+    return true;
+  }
+
   auto script = m_nativeScriptMgr->getScript< Sapphire::ScriptAPI::StatusEffectScript >( effectId );
 
   if( script )
@@ -745,6 +939,12 @@ bool Sapphire::Scripting::ScriptMgr::onStatusReceive( Entity::CharaPtr pActor, u
 bool Sapphire::Scripting::ScriptMgr::onStatusTick( Entity::CharaPtr pActor,
                                                    Sapphire::StatusEffect::StatusEffect& effect )
 {
+  if( auto* luau = m_luau->script( ScriptKind::Status, effect.getId() ) )
+  {
+    m_luau->syncHook( *luau, ScriptHandler::onTick, { pActor, &effect } );
+    return true;
+  }
+
   auto script = m_nativeScriptMgr->getScript< Sapphire::ScriptAPI::StatusEffectScript >( effect.getId() );
   if( script )
   {
@@ -757,6 +957,12 @@ bool Sapphire::Scripting::ScriptMgr::onStatusTick( Entity::CharaPtr pActor,
 
 bool Sapphire::Scripting::ScriptMgr::onStatusTimeOut( Entity::CharaPtr pChara, uint32_t effectId )
 {
+  if( auto* luau = m_luau->script( ScriptKind::Status, effectId ) )
+  {
+    m_luau->syncHook( *luau, ScriptHandler::onExpire, { pChara } );
+    return true;
+  }
+
   auto script = m_nativeScriptMgr->getScript< Sapphire::ScriptAPI::StatusEffectScript >( effectId );
   if( script )
   {
@@ -773,6 +979,12 @@ bool Sapphire::Scripting::ScriptMgr::onStatusTimeOut( Entity::CharaPtr pChara, u
 bool Sapphire::Scripting::ScriptMgr::onPlayerHit( Entity::CharaPtr& pHitChara,
                                                   Sapphire::StatusEffect::StatusEffect& effect )
 {
+  if( auto* luau = m_luau->script( ScriptKind::Status, effect.getId() ) )
+  {
+    m_luau->syncHook( *luau, ScriptHandler::onPlayerHit, { pHitChara, &effect } );
+    return true;
+  }
+
   auto script = m_nativeScriptMgr->getScript< Sapphire::ScriptAPI::StatusEffectScript >( effect.getId() );
   if( script )
   {
@@ -785,6 +997,12 @@ bool Sapphire::Scripting::ScriptMgr::onPlayerHit( Entity::CharaPtr& pHitChara,
 
 bool Sapphire::Scripting::ScriptMgr::onZoneInit( const Territory& zone )
 {
+  if( auto* luau = m_luau->script( ScriptKind::Zone, zone.getTerritoryTypeId() ) )
+  {
+    m_luau->syncHook( *luau, ScriptHandler::onZoneInit, { double( zone.getTerritoryTypeId() ) } );
+    return true;
+  }
+
   auto script = m_nativeScriptMgr->getScript< Sapphire::ScriptAPI::ZoneScript >( zone.getTerritoryTypeId() );
   if( script )
   {
@@ -797,6 +1015,9 @@ bool Sapphire::Scripting::ScriptMgr::onZoneInit( const Territory& zone )
 
 bool Sapphire::Scripting::ScriptMgr::onInstanceInit( InstanceContent& instance )
 {
+  if( m_luau->onInstanceInit( instance ) )
+    return true;
+
   auto instId = instance.getDirectorId();
   auto script = m_nativeScriptMgr->getScript< Sapphire::ScriptAPI::InstanceContentScript >( instance.getDirectorId() );
 
@@ -812,6 +1033,12 @@ bool Sapphire::Scripting::ScriptMgr::onInstanceInit( InstanceContent& instance )
 
 bool Sapphire::Scripting::ScriptMgr::onInstanceReset( InstanceContent& instance )
 {
+  if( m_luau->ownsInstance( instance ) )
+  {
+    m_luau->onInstanceReset( instance );
+    return true;
+  }
+
   auto instId = instance.getDirectorId();
   auto script = m_nativeScriptMgr->getScript< Sapphire::ScriptAPI::InstanceContentScript >( instance.getDirectorId() );
 
@@ -827,6 +1054,12 @@ bool Sapphire::Scripting::ScriptMgr::onInstanceReset( InstanceContent& instance 
 
 bool Sapphire::Scripting::ScriptMgr::onInstanceUpdate( InstanceContent& instance, uint64_t tickCount )
 {
+  if( m_luau->ownsInstance( instance ) )
+  {
+    m_luau->onInstanceUpdate( instance, tickCount );
+    return true;
+  }
+
   auto script = m_nativeScriptMgr->getScript< Sapphire::ScriptAPI::InstanceContentScript >( instance.getDirectorId() );
 
   if( script )
@@ -844,6 +1077,12 @@ bool Sapphire::Scripting::ScriptMgr::onInstanceStateChange( Sapphire::InstanceCo
                                                             Sapphire::InstanceContentState oldState,
                                                             Sapphire::InstanceContentState newState )
 {
+  if( m_luau->ownsInstance( instance ) )
+  {
+    m_luau->onInstanceStateChange( instance, static_cast< uint32_t >( oldState ), static_cast< uint32_t >( newState ) );
+    return true;
+  }
+
   auto script = m_nativeScriptMgr->getScript< Sapphire::ScriptAPI::InstanceContentScript >( instance.getDirectorId() );
 
   if( script )
@@ -860,6 +1099,12 @@ bool Sapphire::Scripting::ScriptMgr::onInstanceStateChange( Sapphire::InstanceCo
 bool Sapphire::Scripting::ScriptMgr::onInstanceEnterTerritory( InstanceContent& instance, Entity::Player& player,
                                                                uint32_t eventId, uint16_t param1, uint16_t param2 )
 {
+  if( m_luau->ownsInstance( instance ) )
+  {
+    m_luau->onInstanceEnterTerritory( instance, player, eventId, param1, param2 );
+    return true;
+  }
+
   auto script = m_nativeScriptMgr->getScript< Sapphire::ScriptAPI::InstanceContentScript >( instance.getDirectorId() );
   if( script )
   {
@@ -872,6 +1117,12 @@ bool Sapphire::Scripting::ScriptMgr::onInstanceEnterTerritory( InstanceContent& 
 
 bool Sapphire::Scripting::ScriptMgr::onInstanceLeaveTerritory( InstanceContent& instance, Entity::Player& player )
 {
+  if( m_luau->ownsInstance( instance ) )
+  {
+    m_luau->onInstanceLeaveTerritory( instance, player );
+    return true;
+  }
+
   auto script = m_nativeScriptMgr->getScript< Sapphire::ScriptAPI::InstanceContentScript >( instance.getDirectorId() );
   if( script )
   {
@@ -884,6 +1135,12 @@ bool Sapphire::Scripting::ScriptMgr::onInstanceLeaveTerritory( InstanceContent& 
 
 bool Sapphire::Scripting::ScriptMgr::onInstanceDirectorSeqChange( InstanceContent& instance, uint8_t seq )
 {
+  if( m_luau->ownsInstance( instance ) )
+  {
+    m_luau->onInstanceDirectorSeqChange( instance, seq );
+    return true;
+  }
+
   auto script = m_nativeScriptMgr->getScript< Sapphire::ScriptAPI::InstanceContentScript >( instance.getDirectorId() );
   if( script )
   {
@@ -896,6 +1153,12 @@ bool Sapphire::Scripting::ScriptMgr::onInstanceDirectorSeqChange( InstanceConten
 
 bool Sapphire::Scripting::ScriptMgr::onInstanceDirectorFlagChange( InstanceContent& instance, uint8_t flag )
 {
+  if( m_luau->ownsInstance( instance ) )
+  {
+    m_luau->onInstanceDirectorFlagChange( instance, flag );
+    return true;
+  }
+
   auto script = m_nativeScriptMgr->getScript< Sapphire::ScriptAPI::InstanceContentScript >( instance.getDirectorId() );
   if( script )
   {
@@ -908,6 +1171,12 @@ bool Sapphire::Scripting::ScriptMgr::onInstanceDirectorFlagChange( InstanceConte
 
 bool Sapphire::Scripting::ScriptMgr::onInstanceDirectorVarChange( InstanceContent& instance, uint8_t var, uint8_t val )
 {
+  if( m_luau->ownsInstance( instance ) )
+  {
+    m_luau->onInstanceDirectorVarChange( instance, var, val );
+    return true;
+  }
+
   auto script = m_nativeScriptMgr->getScript< Sapphire::ScriptAPI::InstanceContentScript >( instance.getDirectorId() );
   if( script )
   {
@@ -920,6 +1189,12 @@ bool Sapphire::Scripting::ScriptMgr::onInstanceDirectorVarChange( InstanceConten
 
 bool Sapphire::Scripting::ScriptMgr::onInstanceCustomVarChange( InstanceContent& instance, uint32_t var, uint64_t val )
 {
+  if( m_luau->ownsInstance( instance ) )
+  {
+    m_luau->onInstanceCustomVarChange( instance );
+    return true;
+  }
+
   auto script = m_nativeScriptMgr->getScript< Sapphire::ScriptAPI::InstanceContentScript >( instance.getDirectorId() );
   if( script )
   {
@@ -932,6 +1207,12 @@ bool Sapphire::Scripting::ScriptMgr::onInstanceCustomVarChange( InstanceContent&
 
 bool Sapphire::Scripting::ScriptMgr::onInstanceActorDeath( InstanceContent& instance, Entity::Chara& chara )
 {
+  if( m_luau->ownsInstance( instance ) )
+  {
+    m_luau->onInstanceActorDeath( instance, chara );
+    return true;
+  }
+
   auto script = m_nativeScriptMgr->getScript< Sapphire::ScriptAPI::InstanceContentScript >( instance.getDirectorId() );
   if( script )
   {
@@ -942,8 +1223,54 @@ bool Sapphire::Scripting::ScriptMgr::onInstanceActorDeath( InstanceContent& inst
   return false;
 }
 
+void Sapphire::Scripting::ScriptMgr::onInstanceDestroy( InstanceContent& instance )
+{
+  m_luau->onInstanceDestroy( instance );
+}
+
+void Sapphire::Scripting::ScriptMgr::onInstanceDestroy( QuestBattle& instance )
+{
+  m_luau->onBattleDestroy( instance );
+}
+
+void Sapphire::Scripting::ScriptMgr::onPlayerLogout( const World::Notifications::PlayerLoggedOut& event )
+{
+  m_luau->onPlayerLogout( event.player );
+}
+
+void Sapphire::Scripting::ScriptMgr::onPlayerTerritoryChanged( const World::Notifications::PlayerTerritoryChanged& event )
+{
+  m_luau->onPlayerTerritoryChanged( event.player );
+}
+
+bool Sapphire::Scripting::ScriptMgr::hasQuestScript( uint32_t questId )
+{
+  return m_luau->questScript( questId ) != nullptr ||
+         m_nativeScriptMgr->getScript< Sapphire::ScriptAPI::QuestScript >( questId ) != nullptr;
+}
+
+uint8_t Sapphire::Scripting::ScriptMgr::getQuestAvailability( Entity::Player& player, uint32_t questId )
+{
+  if( auto* luau = m_luau->questScript( questId ) )
+    return m_luau->getQuestAvailability( *luau, player, questId );
+  if( auto script = m_nativeScriptMgr->getScript< Sapphire::ScriptAPI::QuestScript >( questId ) )
+    return static_cast< uint8_t >( script->getQuestAvailability( player, questId ) );
+  return static_cast< uint8_t >( Event::EventHandler::QuestAvailability::Available );
+}
+
+Sapphire::Scripting::LuauScriptMgr& Sapphire::Scripting::ScriptMgr::getLuauScriptHandler()
+{
+  return *m_luau;
+}
+
 bool Sapphire::Scripting::ScriptMgr::onPlayerSetup( QuestBattle& instance, Entity::Player& player )
 {
+  if( m_luau->ownsBattle( instance ) )
+  {
+    m_luau->onPlayerSetup( instance, player );
+    return true;
+  }
+
   auto script = m_nativeScriptMgr->getScript< Sapphire::ScriptAPI::QuestBattleScript >( instance.getDirectorId() );
   if( script )
   {
@@ -956,6 +1283,9 @@ bool Sapphire::Scripting::ScriptMgr::onPlayerSetup( QuestBattle& instance, Entit
 
 bool Sapphire::Scripting::ScriptMgr::onInstanceInit( QuestBattle& instance )
 {
+  if( m_luau->onBattleInit( instance ) )
+    return true;
+
   auto script = m_nativeScriptMgr->getScript< Sapphire::ScriptAPI::QuestBattleScript >( instance.getDirectorId() );
   if( script )
   {
@@ -968,6 +1298,12 @@ bool Sapphire::Scripting::ScriptMgr::onInstanceInit( QuestBattle& instance )
 
 bool Sapphire::Scripting::ScriptMgr::onInstanceUpdate( QuestBattle& instance, uint64_t tickCount )
 {
+  if( m_luau->ownsBattle( instance ) )
+  {
+    m_luau->onBattleUpdate( instance, tickCount );
+    return true;
+  }
+
   auto script = m_nativeScriptMgr->getScript< Sapphire::ScriptAPI::QuestBattleScript >( instance.getDirectorId() );
 
   if( script )
@@ -981,6 +1317,12 @@ bool Sapphire::Scripting::ScriptMgr::onInstanceUpdate( QuestBattle& instance, ui
 
 bool Sapphire::Scripting::ScriptMgr::onDutyCommence( QuestBattle& instance, Entity::Player& player )
 {
+  if( m_luau->ownsBattle( instance ) )
+  {
+    m_luau->onDutyCommence( instance, player );
+    return true;
+  }
+
   auto script = m_nativeScriptMgr->getScript< Sapphire::ScriptAPI::QuestBattleScript >( instance.getDirectorId() );
 
   if( script )
@@ -995,6 +1337,12 @@ bool Sapphire::Scripting::ScriptMgr::onDutyCommence( QuestBattle& instance, Enti
 bool Sapphire::Scripting::ScriptMgr::onInstanceEnterTerritory( QuestBattle& instance, Entity::Player& player,
                                                                uint32_t eventId, uint16_t param1, uint16_t param2 )
 {
+  if( m_luau->ownsBattle( instance ) )
+  {
+    m_luau->onBattleEnterTerritory( instance, player, eventId, param1, param2 );
+    return true;
+  }
+
   auto script = m_nativeScriptMgr->getScript< Sapphire::ScriptAPI::QuestBattleScript >( instance.getDirectorId() );
   if( script )
   {
@@ -1013,6 +1361,12 @@ Sapphire::Scripting::NativeScriptMgr& Sapphire::Scripting::ScriptMgr::getNativeS
 bool
 Sapphire::Scripting::ScriptMgr::onDutyComplete( QuestBattle& instance, Sapphire::Entity::Player& player )
 {
+  if( m_luau->ownsBattle( instance ) )
+  {
+    m_luau->onDutyComplete( instance, player );
+    return true;
+  }
+
   auto script = m_nativeScriptMgr->getScript< Sapphire::ScriptAPI::QuestBattleScript >( instance.getDirectorId() );
   if( script )
   {
@@ -1030,6 +1384,12 @@ Sapphire::Scripting::ScriptMgr::onDutyComplete( QuestBattle& instance, Sapphire:
   return false;
 }
 
+void Sapphire::Scripting::ScriptMgr::onBattleChange( QuestBattle& instance )
+{
+  if( m_luau->ownsBattle( instance ) )
+    m_luau->onBattleChange( instance );
+}
+
 bool Sapphire::Scripting::ScriptMgr::onSay( Sapphire::Entity::Player& player, uint64_t actorId, uint32_t eventId,
                                             uint32_t sayId )
 {
@@ -1037,6 +1397,13 @@ bool Sapphire::Scripting::ScriptMgr::onSay( Sapphire::Entity::Player& player, ui
   auto& exdData = Common::Service< Data::ExdData >::ref();
   if( eventType == Event::EventHandler::EventHandlerType::Quest )
   {
+    if( auto* luau = m_luau->questScript( eventId ) )
+    {
+      auto actorBaseId = Common::Service< World::Manager::EventMgr >::ref().getActorBaseId( static_cast< uint32_t >( actorId ) );
+      m_luau->questHook( *luau, ScriptHandler::onSay, player, eventId, false, { double( actorBaseId ), double( sayId ) } );
+      return true;
+    }
+
     auto script = m_nativeScriptMgr->getScript< Sapphire::ScriptAPI::QuestScript >( eventId );
     if( !script )
     {

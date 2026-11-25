@@ -26,6 +26,7 @@
 #include "Network/PacketWrappers/PlayerSpawnPacket.h"
 #include "Network/GameConnection.h"
 #include "Script/ScriptMgr.h"
+#include "Script/Luau/LuauScriptMgr.h"
 #include "Script/NativeScriptMgr.h"
 
 #include "Actor/EventObject.h"
@@ -939,6 +940,65 @@ void DebugCommandMgr::script( char* data, Entity::Player& player, std::shared_pt
       scriptMgr.getNativeScriptHandler().queueScriptReload( params );
       PlayerMgr::sendDebug( player, "Queued script reload for script: {0}", params );
     }
+  }
+  else if( subCommand == "luau" )
+  {
+    auto& luau = scriptMgr.getLuauScriptHandler();
+    std::string action = subCommand == params ? std::string() : params;
+    std::string arg;
+    auto space = action.find( ' ' );
+    if( space != std::string::npos )
+    {
+      arg = action.substr( space + 1 );
+      action = action.substr( 0, space );
+    }
+
+    if( action == "status" )
+    {
+      for( auto& line : luau.statusLines() )
+        PlayerMgr::sendDebug( player, line );
+    }
+    else if( action == "reload" && !arg.empty() )
+    {
+      for( auto& line : luau.reloadByName( arg ) )
+        PlayerMgr::sendDebug( player, line );
+    }
+    else if( action == "restart" )
+    {
+      switch( luau.restartVm() )
+      {
+        case Scripting::VmRestart::Restarted:
+          PlayerMgr::sendDebug( player, "Luau VM restarted" );
+          break;
+        case Scripting::VmRestart::Deferred:
+          PlayerMgr::sendDebug( player, "Luau VM restart deferred until the running script segment ends" );
+          break;
+        case Scripting::VmRestart::Failed:
+          PlayerMgr::sendDebug( player, "Luau VM failed to restart (see the server log)" );
+          break;
+        case Scripting::VmRestart::Disabled:
+          PlayerMgr::sendDebug( player, "Luau scripting is disabled" );
+          break;
+      }
+    }
+    else if( action == "types" )
+    {
+      std::string path;
+      if( luau.writeTypes( path ) )
+        PlayerMgr::sendDebug( player, "Wrote {0}", path );
+      else
+        PlayerMgr::sendDebug( player, "Could not write {0}", path );
+    }
+    else if( action == "dump" )
+    {
+      uint32_t guid = player.getTerritoryId();
+      if( !arg.empty() )
+        guid = static_cast< uint32_t >( std::strtoul( arg.c_str(), nullptr, 10 ) );
+      for( auto& line : luau.dumpLines( guid ) )
+        PlayerMgr::sendDebug( player, line );
+    }
+    else
+      PlayerMgr::sendDebug( player, "Usage: !script luau status|reload <name>|restart|types|dump [guid]" );
   }
   else
   {

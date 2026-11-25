@@ -188,6 +188,7 @@ namespace Sapphire
 
     Entity::BNpcPtr createBNpcFromLayoutId( uint32_t levelId, uint32_t hp, Common::BNpcType bnpcType, uint32_t triggerOwnerId = 0 );
     Entity::BNpcPtr createBNpcFromLayoutIdNoPush( uint32_t levelId, uint32_t hp, Common::BNpcType bnpcType, uint32_t triggerOwnerId = 0 );
+    bool hasBNpcLayout( uint32_t layoutId ) const;
 
     Entity::GameObjectPtr getEntityById( uint32_t entityId );
 

@@ -348,17 +348,15 @@ void MapMgr::insertQuest( Entity::Player& player, uint32_t questId, uint32_t lay
 
   if( isQuestVisible( player, questId, quest ) )
   {
-    auto script = scriptMgr.getNativeScriptHandler().getScript< Sapphire::ScriptAPI::QuestScript >( questId );
-
     // Just don't show quests on map, that aren't implemented yet
-    if( !script )
+    if( !scriptMgr.hasQuestScript( questId ) )
       return;
              
     EventData eventData;
     eventData.handlerId = questId;
     eventData.layoutId = layoutId;
 
-    auto eventState = script->getQuestAvailability( player, questId );
+    auto eventState = static_cast< Event::EventHandler::QuestAvailability >( scriptMgr.getQuestAvailability( player, questId ) );
 
     if( eventState == Event::EventHandler::QuestAvailability::Available || eventState == Event::EventHandler::QuestAvailability::Locked )
     {

@@ -1033,6 +1033,11 @@ Entity::BNpcPtr Territory::createBNpcFromLayoutIdNoPush( uint32_t layoutId, uint
   return pBNpc;
 }
 
+bool Territory::hasBNpcLayout( uint32_t layoutId ) const
+{
+  return m_bNpcBaseMap.count( layoutId ) != 0;
+}
+
 Entity::GameObjectPtr Territory::getEntityById( uint32_t entityId )
 {
   Entity::GameObjectPtr pRet = nullptr;

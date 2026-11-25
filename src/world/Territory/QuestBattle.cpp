@@ -193,18 +193,27 @@ void Sapphire::QuestBattle::setVar( uint8_t index, uint8_t value )
 {
   setDirectorVar( index, value );
   sendDirectorVars( *m_pPlayer );
+  Common::Service< Scripting::ScriptMgr >::ref().onBattleChange( *this );
 }
 
 void Sapphire::QuestBattle::setSequence( uint8_t value )
 {
   setDirectorSequence( value );
   sendDirectorVars( *m_pPlayer );
+  Common::Service< Scripting::ScriptMgr >::ref().onBattleChange( *this );
 }
 
 void Sapphire::QuestBattle::setFlags( uint8_t value )
 {
   setDirectorFlags( value );
   sendDirectorVars( *m_pPlayer );
+  Common::Service< Scripting::ScriptMgr >::ref().onBattleChange( *this );
+}
+
+void Sapphire::QuestBattle::setCustomVar( uint32_t var, uint64_t value )
+{
+  Director::setCustomVar( var, value );
+  Common::Service< Scripting::ScriptMgr >::ref().onBattleChange( *this );
 }
 
 void Sapphire::QuestBattle::startQte()

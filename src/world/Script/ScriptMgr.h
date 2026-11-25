@@ -12,6 +12,8 @@
 
 namespace Sapphire::Scripting
 {
+  class LuauScriptMgr;
+
   class ScriptMgr
   {
   private:
@@ -19,6 +21,11 @@ namespace Sapphire::Scripting
      * @brief A shared ptr to NativeScriptMgr, used for accessing and managing the native script system.
      */
     std::shared_ptr< NativeScriptMgr > m_nativeScriptMgr;
+
+    /*!
+     * @brief Luau scripts, a .luau script shadows/replaces the native script with the same id while its file exists.
+     */
+    std::unique_ptr< LuauScriptMgr > m_luau;
 
     std::function< std::string( Entity::Player& ) > m_onFirstEnterWorld;
 
@@ -143,6 +150,22 @@ namespace Sapphire::Scripting
 
     bool onInstanceActorDeath( InstanceContent& instance, Entity::Chara& chara );
 
+    void onInstanceDestroy( InstanceContent& instance );
+
+    void onInstanceDestroy( QuestBattle& instance );
+
+    void onPlayerLogout( const World::Notifications::PlayerLoggedOut& event );
+
+    void onPlayerTerritoryChanged( const World::Notifications::PlayerTerritoryChanged& event );
+
+    /*! true when a luau or native script implements the quest */
+    bool hasQuestScript( uint32_t questId );
+
+    /*! Event::EventHandler::QuestAvailability as uint8_t: luau when it owns the quest, else the native script's value, else Available */
+    uint8_t getQuestAvailability( Entity::Player& player, uint32_t questId );
+
+    LuauScriptMgr& getLuauScriptHandler();
+
     bool onPlayerSetup( QuestBattle& instance, Entity::Player& player );
 
     bool onInstanceInit( QuestBattle& instance );
@@ -155,6 +178,9 @@ namespace Sapphire::Scripting
                                    uint16_t param2 );
 
     bool onDutyComplete( QuestBattle& instance, Entity::Player& player );
+
+    /*! a quest battle director var/sequence/flags/custom var change or an actor death. wakes the Luau battle script's wait.till */
+    void onBattleChange( QuestBattle& instance );
 
     bool loadDir( const std::string& dirname, std::set< std::string >& files, const std::string& ext );
 

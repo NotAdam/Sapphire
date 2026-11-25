@@ -22,6 +22,7 @@ add_subdirectory( "event_object_parser" )
 add_subdirectory( "action_parse" )
 add_subdirectory( "wiki_parse" )
 add_subdirectory( "BattleNpcToJson" )
+add_subdirectory( "luau_selftest" )
 
 if( SAPPHIRE_BUILD_TOOLKIT )
   add_subdirectory( "Toolkit" )

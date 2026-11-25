@@ -990,8 +990,12 @@ namespace Sapphire
         {
           case VarType::Director:
           {
-            auto pDirector = pEncounter->getDirector();
-            if( pDirector)
+            // the instance / quest battle setters resend the vars and notify the scripts
+            if( auto pInstance = pTeri->getAsInstanceContent() )
+              pInstance->setVar( pRNGData->m_idx, val );
+            else if( auto pQuestBattle = pTeri->getAsQuestBattle() )
+              pQuestBattle->setVar( pRNGData->m_idx, val );
+            else if( auto pDirector = pEncounter->getDirector() )
               pDirector->setDirectorVar( pRNGData->m_idx, val );
           }
           break;

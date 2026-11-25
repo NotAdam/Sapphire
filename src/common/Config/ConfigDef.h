@@ -57,6 +57,9 @@ namespace Sapphire::Common::Config
       std::string path;
       std::string cachePath;
       bool hotSwap;
+      std::string luauPath;
+      std::string luauReadOnlyGlobals;
+      uint32_t luauTimeBudgetMs;
     } scripts;
 
     struct Navigation

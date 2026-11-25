@@ -36,6 +36,9 @@ add_custom_target( copy_runtime_files ALL
                      COMMAND ${CMAKE_COMMAND} -E copy_directory ${CMAKE_SOURCE_DIR}/web ${CMAKE_RUNTIME_OUTPUT_DIRECTORY}/web
                      COMMAND ${CMAKE_COMMAND} -E copy ${CMAKE_SOURCE_DIR}/sql_import.sh ${CMAKE_RUNTIME_OUTPUT_DIRECTORY}/sql_import.sh )
 
+add_custom_target( copy_lua_scripts
+                     COMMAND ${CMAKE_COMMAND} -E copy_directory ${CMAKE_SOURCE_DIR}/src/lua_scripts ${CMAKE_RUNTIME_OUTPUT_DIRECTORY}/scripts )
+
 file( COPY ${CMAKE_SOURCE_DIR}/data DESTINATION ${CMAKE_RUNTIME_OUTPUT_DIRECTORY} )
 
 option( SAPPHIRE_BUILD_TOOLKIT "Build the Sapphire Toolkit" ON )
@@ -132,6 +135,14 @@ add_subdirectory( "deps/datReaderPs3" )
 add_subdirectory( "deps/mysqlConnector" )
 set(RECASTNAVIGATION_DT_POLYREF64 ON CACHE BOOL "Use 64bit polyrefs instead of 32bit for Detour" FORCE)
 add_subdirectory( "deps/recastnavigation" )
+
+if( NOT EXISTS "${CMAKE_SOURCE_DIR}/deps/luau/CMakeLists.txt" )
+  message( FATAL_ERROR "Luau source is missing. Run: git submodule update --init --recursive -- deps/luau" )
+endif()
+set( LUAU_BUILD_CLI OFF CACHE BOOL "" FORCE )
+set( LUAU_BUILD_TESTS OFF CACHE BOOL "" FORCE )
+set( LUAU_BUILD_WEB OFF CACHE BOOL "" FORCE )
+add_subdirectory( "deps/luau" EXCLUDE_FROM_ALL )
 
 if( SAPPHIRE_BUILD_TOOLKIT )
   # Build GLM as a static library

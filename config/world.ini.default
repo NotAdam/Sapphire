@@ -5,6 +5,16 @@ Path = ./compiledscripts/
 CachePath = ./cache/
 ; whether we should detect changes to script modules and reload them
 HotSwap = true
+; where .luau scripts are loaded from. Unset = the source tree's src/lua_scripts (edit + save = hot reload).
+; For a deployment run the copy_lua_scripts target and set: LuauPath = ./scripts/
+; LuauPath = ./scripts/
+; script types whose globals become read-only once the script has loaded (comma separated, empty = none):
+; instance, questbattle, quest, event, action, status, zone, eobj
+; A handler that assigns a global in such a script raises an error instead of silently sharing state between players.
+LuauReadOnlyGlobals = quest,event,action,status,zone,eobj
+; longest a script may run without yielding, in milliseconds, before it is aborted with an error (guards the server
+; thread against endless loops). 0 disables the guard.
+LuauTimeBudgetMs = 1000
 
 [Network]
 ListenIp = 0.0.0.0

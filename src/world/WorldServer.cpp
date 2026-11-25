@@ -90,11 +90,13 @@ WorldServer::WorldServer( const std::string& configName ) :
   subscribeManager( m_sessionEvents.loggedOut, &PlayerMgr::onLogout );
   subscribeManager( m_sessionEvents.loggedOut, &FreeCompanyMgr::onFcLogout );
   subscribeManager( m_sessionEvents.loggedOut, &PartyMgr::onMemberDisconnect );
+  subscribeManager( m_sessionEvents.loggedOut, &Sapphire::Scripting::ScriptMgr::onPlayerLogout );
 
   subscribeManager( m_playerEvents.died, &Sapphire::Scripting::ScriptMgr::onPlayerDeath );
   subscribeManager( m_playerEvents.npcKillCredited, &Sapphire::Scripting::ScriptMgr::onBNpcKill );
   subscribeManager( m_playerEvents.npcKillCredited, &PlayerMgr::onNpcKillCredited );
   subscribeManager( m_playerEvents.territoryChanged, &PartyMgr::onMoveZone );
+  subscribeManager( m_playerEvents.territoryChanged, &Sapphire::Scripting::ScriptMgr::onPlayerTerritoryChanged );
 }
 
 std::vector< std::string > WorldServer::getLoggedInPlayersSnapshot()
@@ -188,6 +190,9 @@ bool WorldServer::loadSettings( int32_t argc, char *argv[ ] )
   m_config.scripts.hotSwap = configMgr.getValue( "Scripts", "HotSwap", true );
   m_config.scripts.path = configMgr.getValue< std::string >( "Scripts", "Path", "./compiledscripts/" );
   m_config.scripts.cachePath = configMgr.getValue< std::string >( "Scripts", "CachePath", "./cache/" );
+  m_config.scripts.luauPath = configMgr.getValue< std::string >( "Scripts", "LuauPath", "" );
+  m_config.scripts.luauReadOnlyGlobals = configMgr.getValue< std::string >( "Scripts", "LuauReadOnlyGlobals", "quest,event,action,status,zone,eobj" );
+  m_config.scripts.luauTimeBudgetMs = configMgr.getValue< uint32_t >( "Scripts", "LuauTimeBudgetMs", 1000 );
 
   m_config.navigation.meshPath = configMgr.getValue< std::string >( "Navigation", "MeshPath", "navi" );
   m_config.map.eagerENpcEObjCache = configMgr.getValue( "Map", "EagerENpcEObjCache", true );

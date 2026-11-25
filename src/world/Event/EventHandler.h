@@ -8,14 +8,14 @@ namespace Sapphire::Event
   struct SceneResult
   {
   public:
-    uint64_t actorId;
-    uint32_t eventId;
-    uint16_t sceneId;
-    uint8_t errorCode;
-    uint8_t numOfResults;
+    uint64_t actorId{ 0 };
+    uint32_t eventId{ 0 };
+    uint16_t sceneId{ 0 };
+    uint8_t errorCode{ 0 };
+    uint8_t numOfResults{ 0 };
     std::vector< uint32_t > results;
     std::string resultString;
-    uint64_t intResult;
+    uint64_t intResult{ 0 };
 
     uint32_t getResult( uint32_t index ) const;
   };

@@ -303,10 +303,13 @@ void Chara::die()
   auto& teriMgr = Common::Service< Manager::TerritoryMgr >::ref();
   auto pTeri = teriMgr.getTerritoryByGuId( getTerritoryId() );
 
-  if( auto pInstance = pTeri ? pTeri->getAsInstanceContent() : nullptr )
+  if( pTeri )
   {
     auto& scriptMgr = Common::Service< Scripting::ScriptMgr >::ref();
-    scriptMgr.onInstanceActorDeath( *pInstance, *this );
+    if( auto pInstance = pTeri->getAsInstanceContent() )
+      scriptMgr.onInstanceActorDeath( *pInstance, *this );
+    else if( auto pBattle = pTeri->getAsQuestBattle() )
+      scriptMgr.onBattleChange( *pBattle );
   }
 
   removeStatusEffectByFlag( Common::StatusEffectFlag::RemoveOnDeath );
